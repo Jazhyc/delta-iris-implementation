@@ -1,0 +1,19 @@
+[project]
+name = "delta-iris-implementation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "craftax>=1.4.5",
+    "einops>=0.8.1",
+    "gym[accept-rom-license]>=0.26.2",
+    "gymnax>=0.0.9",
+    "hydra-core>=1.3.2",
+    "jax[cuda12]>=0.5.3",
+    "pygame>=2.6.1",
+    "torch>=2.7.1",
+    "torchvision>=0.22.1",
+    "tqdm>=4.67.1",
+    "wandb>=0.20.1",
+]
