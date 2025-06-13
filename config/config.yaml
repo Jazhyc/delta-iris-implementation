@@ -1,0 +1,8 @@
+defaults:
+  - _self_
+  - env: pendulum
+  - model: continuous
+
+wandb:
+  entity: personal_experiments
+  project: DeltaIris

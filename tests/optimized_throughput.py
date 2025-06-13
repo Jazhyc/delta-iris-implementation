@@ -41,7 +41,7 @@ def benchmark_gymnax(num_steps=100_000):
     print(f"Total steps: {actual_total_steps} (requested: {num_steps})")
     
     # Instantiate the environment & its settings
-    env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
+    env = make_craftax_env_from_name("Craftax-Classic-Symbolic-v1", auto_reset=True)
     env_params = env.default_params
     
     SimplePolicyJax = ivy.transpile(SimplePolicy, source="torch", target="jax")

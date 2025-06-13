@@ -197,3 +197,4 @@ cython_debug/
 .python-version
 ivy_transpiled_outputs
 ivy_logs.txt
+outputs
