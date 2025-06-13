@@ -20,5 +20,6 @@ def make_gym_env(env_name):
 
 def make_craftax_env(env_name):
     """Create a Craftax environment from a given name."""
-    env, env_params = make_craftax_env_from_name(env_name, auto_reset=True)
+    env = make_craftax_env_from_name(env_name, auto_reset=True)
+    env_params = env.default_params
     return env, env_params
