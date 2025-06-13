@@ -7,13 +7,8 @@ import numpy as np
 from tqdm import tqdm
 import torch
 import torch.nn as nn
-from functools import partial
-from typing import Union
-from gymnasium.error import DependencyNotInstalled
-from gymnasium.wrappers.array_conversion import (
-    array_conversion,
-    module_namespace,
-)
+
+from craftax.craftax_env import make_craftax_env_from_name
 
 import ivy
 import os
@@ -22,17 +17,13 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 device_jax = jax.devices()[0]
 device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-NUM_ENVS = 2048
+NUM_ENVS = 32
 
 class SimplePolicy(nn.Module):
     """Simple neural network that returns a fixed action regardless of input"""
     def __init__(self, obs_dim=3, action_dim=1):
         super().__init__()
         self.linear = nn.Linear(obs_dim, action_dim)
-        # Initialize weights to return fixed action
-        with torch.no_grad():
-            self.linear.weight.fill_(0.0)
-            self.linear.bias.fill_(1.0)  # Returns [1.0] for pendulum torque
     
     def forward(self, x):
         return self.linear(x)
@@ -49,11 +40,14 @@ def benchmark_gymnax(num_steps=100_000):
     print(f"Running {steps_per_env} steps per environment across {NUM_ENVS} environments")
     print(f"Total steps: {actual_total_steps} (requested: {num_steps})")
     
-    SimplePolicyJax = ivy.transpile(SimplePolicy, source="torch", target="jax")
-    policy_jax = SimplePolicyJax(obs_dim=3, action_dim=1)
-    
     # Instantiate the environment & its settings
-    env, env_params = gymnax.make("Pendulum-v1")
+    env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
+    env_params = env.default_params
+    
+    SimplePolicyJax = ivy.transpile(SimplePolicy, source="torch", target="jax")
+    
+    policy_jax = SimplePolicyJax(obs_dim=env.observation_space(env_params).shape[0],
+                                 action_dim=env.num_actions)
     
     def rollout(key_input, env_params, steps_in_episode):
         """Rollout a jitted gymnax episode with lax.scan."""
@@ -69,6 +63,9 @@ def benchmark_gymnax(num_steps=100_000):
             
             with torch.no_grad():
                 action = policy_jax(obs)
+                # argmax
+                action = jnp.argmax(action, axis=-1)
+                
             next_obs, next_state, reward, done, _ = env.step(
                 key_step, state, action, env_params
             )
@@ -92,8 +89,26 @@ def benchmark_gymnax(num_steps=100_000):
     
     start_time = time.time()
     
-    # Run parallel rollouts for steps_per_env steps each
-    obs, action, reward, next_obs, done = jit_rollout(keys, env_params, steps_per_env)
+    
+    print("Starting parallel rollouts...")
+    # Run parallel rollouts for steps_per_env steps each. 
+    rollout_length = 16 # Number of steps before creating a new rollout
+    num_rollouts = steps_per_env // rollout_length
+    
+    # Only save done
+    done = jnp.zeros((NUM_ENVS, rollout_length), dtype=jnp.bool_)
+    for i in tqdm(range(num_rollouts), desc="Gymnax parallel rollouts"):
+        # Run the rollout for all environments
+        scan_out = jit_rollout(keys, env_params, rollout_length)
+        
+        # Extract done flags from the scan output
+        obs, actions, rewards, next_obs, done_batch = scan_out
+        
+        # Update the done array
+        done = jnp.logical_or(done, done_batch)
+        
+        # Update keys for next iteration
+        keys = jax.random.split(keys[-1], NUM_ENVS)
     
     # Get number of done episodes across all environments
     num_done = jnp.sum(done)
@@ -151,11 +166,10 @@ def benchmark_gymnasium(num_steps=100_000):
 
 
 def main():
-    num_steps = 100_000_000
+    num_steps = 1_000_000
     
     # Benchmark both environments
     gymnax_time, gymnax_sps = benchmark_gymnax(num_steps)
-    # gymnasium_time, gymnasium_sps = benchmark_gymnasium(num_steps)
     
     # Display results
     print("\n" + "="*50)
@@ -167,12 +181,6 @@ def main():
     print(f"  Time: {gymnax_time:.2f} seconds")
     print(f"  Throughput: {gymnax_sps:.2f} steps/sec")
     print()
-    # print(f"Gymnasium Pendulum-v1:")
-    # print(f"  Time: {gymnasium_time:.2f} seconds")
-    # print(f"  Throughput: {gymnasium_sps:.2f} steps/sec")
-    # print()
-    # print(f"Speedup: {gymnax_sps / gymnasium_sps:.2f}x")
-    # print("="*50)
 
 if __name__ == "__main__":
     main()

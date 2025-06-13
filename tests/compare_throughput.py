@@ -18,7 +18,7 @@ from gymnax.wrappers.gym import GymnaxToVectorGymWrapper
 
 device_jax = jax.devices()[0]
 device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-NUM_ENVS = 256
+NUM_ENVS = 2048
 
 torch_to_jax = partial(array_conversion, xp=module_namespace(jnp), device=device_jax)
 jax_to_torch = partial(array_conversion, xp=module_namespace(torch), device=device_torch)
