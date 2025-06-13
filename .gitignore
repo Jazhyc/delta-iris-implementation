@@ -192,3 +192,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+.ivy
+.python-version
+ivy_transpiled_outputs
+ivy_logs.txt
