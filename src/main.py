@@ -1,4 +1,4 @@
-import hydra
+import hydra, wandb
 from omegaconf import DictConfig, OmegaConf
 from env import make_env
 import os
@@ -23,6 +23,14 @@ def main(cfg: DictConfig) -> None:
     
     print(f"Action space: {action_space}")
     print(f"Observation space: {obs_space}")
+    
+    # Initialize Weights & Biases
+    wandb.init(
+        project=cfg.wandb.project,
+        entity=cfg.wandb.entity,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        mode=cfg.wandb.mode,
+    )
     
 if __name__ == "__main__":
     main()

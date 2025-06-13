@@ -198,3 +198,4 @@ cython_debug/
 ivy_transpiled_outputs
 ivy_logs.txt
 outputs
+wandb

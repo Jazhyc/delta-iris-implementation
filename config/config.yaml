@@ -6,3 +6,4 @@ defaults:
 wandb:
   entity: personal_experiments
   project: DeltaIris
+  mode: offline
