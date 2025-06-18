@@ -17,6 +17,27 @@ class TokenizerConfig:
     learning_rate: float = 1e-4
 
 
+@dataclass 
+class DeltaTokenizerConfig(TokenizerConfig):
+    """Enhanced configuration for Delta-IRIS tokenizer"""
+    # Spatial tokenization
+    spatial_grid_size: int = 8  # Split observations into spatial grids
+    patch_size: int = 4  # Size of each spatial patch
+    
+    # Context-aware encoding
+    context_length: int = 4  # Number of previous observations to use for context
+    delta_encoding: bool = True  # Use delta (difference) encoding
+    
+    # Advanced VQ parameters
+    use_exponential_moving_average: bool = True
+    ema_decay: float = 0.99
+    commitment_cost: float = 0.25
+    
+    # Spatial attention
+    use_spatial_attention: bool = True
+    spatial_attention_heads: int = 4
+
+
 @dataclass
 class WorldModelConfig:
     """Configuration for the world model component"""
@@ -44,11 +65,11 @@ class ActorCriticConfig:
 
 
 @dataclass
-class BufferConfig:  
-    """Configuration for the experience buffer"""
-    capacity: int = 100000
+class DataConfig:  
+    """Configuration for the episode dataset and sampling"""
     sequence_length: int = 64
     batch_size: int = 32
+    # Note: Dataset capacity is dynamic (episodes saved to disk)
 
 
 @dataclass
@@ -58,7 +79,7 @@ class TrainerConfig:
     tokenizer: TokenizerConfig
     world_model: WorldModelConfig  
     actor_critic: ActorCriticConfig
-    buffer: BufferConfig
+    data: DataConfig  # Renamed from buffer
     
     # Training parameters (optional fields with defaults)
     epochs: int = 1000

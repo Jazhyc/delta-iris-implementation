@@ -172,7 +172,7 @@ class ActorCritic(nn.Module):
         return returns, advantages
         
     def imagination_rollout(self, world_model, tokenizer, initial_obs: torch.Tensor, 
-                           horizon: int) -> ImaginationRollout:
+                           horizon: int, last_action: torch.Tensor = None) -> ImaginationRollout:
         """
         Perform imagination rollout using world model
         
@@ -181,6 +181,7 @@ class ActorCritic(nn.Module):
             tokenizer: Tokenizer for encoding/decoding observations
             initial_obs: [batch, obs_dim] - starting observations
             horizon: Number of steps to rollout
+            last_action: [batch] - last action taken to reach initial_obs (optional)
             
         Returns:
             ImaginationRollout containing rollout data
@@ -190,43 +191,47 @@ class ActorCritic(nn.Module):
         
         rollout = ImaginationRollout()
         
-        # Initialize current state
+        # Initialize current state and token sequence
         current_obs = initial_obs
         
         with torch.no_grad():
-            # Get initial tokens from observations
-            # Note: This is a simplification - in practice you'd need to maintain
-            # a proper token sequence from the tokenizer
-            dummy_actions = torch.zeros(batch_size, 1, self.config.action_dim, device=device)
+            # Get initial tokens from observations with proper action handling
+            if last_action is not None:
+                # Use the provided last action for better context
+                dummy_actions = last_action.unsqueeze(1)  # [batch, 1]
+            else:
+                # Fallback to dummy action if no context provided
+                dummy_actions = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+            
             current_tokens = tokenizer.get_tokens(current_obs.unsqueeze(1), dummy_actions).squeeze(1)
             
         for step in range(horizon):
             # Get action and value from current observation
             action, log_prob, value = self.get_action_and_value(current_obs)
             
-            # Convert action to one-hot for world model
-            action_onehot = F.one_hot(action, self.config.action_dim).float()
-            
-            # Prepare inputs for world model
+            # Prepare inputs for world model (discrete actions)
             tokens_input = current_tokens.unsqueeze(1)  # [batch, 1]
-            actions_input = action.unsqueeze(1)  # [batch, 1]
+            actions_input = action.unsqueeze(1)  # [batch, 1] - discrete actions
             
             # Get world model predictions
             with torch.no_grad():
                 predictions = world_model(tokens_input, actions_input)
                 
-                # Sample next token
+                # Sample next token with temperature for exploration
                 next_token_logits = predictions['next_token_logits'][:, 0]  # [batch, vocab_size]
-                next_tokens = torch.multinomial(F.softmax(next_token_logits, dim=-1), 1).squeeze(1)
                 
-                # Get predicted reward and done
+                # Apply temperature for controlled exploration
+                temperature = 1.0
+                next_token_probs = F.softmax(next_token_logits / temperature, dim=-1)
+                next_tokens = torch.multinomial(next_token_probs, 1).squeeze(1)
+                
+                # Get predicted reward and done with proper thresholding
                 predicted_reward = predictions['reward_predictions'][:, 0]  # [batch]
-                predicted_done = torch.sigmoid(predictions['done_predictions'][:, 0]) > 0.5  # [batch]
+                done_logits = predictions['done_predictions'][:, 0]  # [batch]
+                predicted_done = torch.sigmoid(done_logits) > 0.5  # [batch]
                 
-                # Decode next observation from next tokens
-                # This is simplified - you'd need proper sequence handling
-                dummy_next_actions = torch.zeros(batch_size, 1, self.config.action_dim, device=device)
-                next_obs = tokenizer.decode_tokens(next_tokens.unsqueeze(1), dummy_next_actions).squeeze(1)
+                # Decode next observation from next tokens using the current action
+                next_obs = tokenizer.decode_tokens(next_tokens.unsqueeze(1), action.unsqueeze(1)).squeeze(1)
             
             # Add step to rollout
             rollout.add_step(
@@ -238,7 +243,7 @@ class ActorCritic(nn.Module):
                 log_prob=log_prob
             )
             
-            # Update current state
+            # Update current state and maintain token sequence
             current_obs = next_obs
             current_tokens = next_tokens
             

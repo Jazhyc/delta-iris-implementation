@@ -13,7 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from agent.config import TrainerConfig
-from agent.buffer import ExperienceBuffer, Episode
+from data import Episode, Batch, EpisodeDataset, BatchSampler, EpisodeCountManager, collate_segments_to_batch
 from agent.tokenizer import Tokenizer
 from agent.world_model import WorldModel
 from agent.actor_critic import ActorCritic
@@ -87,14 +87,18 @@ class DeltaIrisTrainer:
             lr=config.actor_critic.learning_rate
         )
         
-        # Initialize experience buffer
-        self.buffer = ExperienceBuffer(
-            capacity=config.buffer.capacity,
-            obs_dim=self.obs_dim,
-            action_dim=self.raw_action_dim,  # Buffer stores raw actions
-            device=self.device,
-            dtype=self.dtype
+        # Initialize experience dataset and episode count manager
+        from pathlib import Path
+        dataset_dir = Path("dataset")
+        dataset_dir.mkdir(exist_ok=True)
+        
+        self.train_dataset = EpisodeDataset(
+            directory=dataset_dir / 'train',
+            name='train_dataset'
         )
+        
+        self.episode_count_manager = EpisodeCountManager(self.train_dataset)
+        self.episode_count_manager.register('tokenizer', 'world_model', 'actor_critic')
         
         # Create single environment for data collection (simpler than vectorized)
         self.single_env, _ = make_env(env_name, num_envs=1)
@@ -144,7 +148,7 @@ class DeltaIrisTrainer:
                     # Store transition
                     episode_actions.append(action_np)
                     episode_rewards.append(float(reward))
-                    episode_dones.append(done)
+                    episode_dones.append(1 if done else 0)  # Convert to int for consistency
                     
                     episode_obs.append(next_obs)
                     obs = next_obs
@@ -154,7 +158,7 @@ class DeltaIrisTrainer:
                 obs_tensor = torch.stack(episode_obs[:-1])
                 actions_tensor = torch.stack([torch.from_numpy(action) for action in episode_actions])
                 rewards_tensor = torch.tensor(episode_rewards, dtype=self.dtype)
-                dones_tensor = torch.tensor(episode_dones, dtype=torch.bool)
+                dones_tensor = torch.tensor(episode_dones, dtype=torch.long)  # LongTensor for consistency
                 
                 # Handle potential extra dimensions from vectorized environment
                 if obs_tensor.dim() > 2:
@@ -164,21 +168,21 @@ class DeltaIrisTrainer:
                 
                 episode = Episode(
                     observations=obs_tensor.to(device=self.device, dtype=self.dtype),
-                    actions=actions_tensor.to(device=self.device, dtype=self.dtype),
+                    actions=actions_tensor.to(device=self.device, dtype=torch.long),
                     rewards=rewards_tensor.to(device=self.device),
-                    dones=dones_tensor.to(device=self.device)
+                    ends=dones_tensor.to(device=self.device)
                 )
                 
                 episodes.append(episode)
-                self.buffer.add_episode(episode)
+                # Add episode to dataset
+                episode_id = self.train_dataset.add_episode(episode)
+                self.episode_count_manager.add_episode(episode_id)
                 
                 # Track episode stats
                 episode_reward = sum(episode_rewards)
                 episode_length = len(episode_rewards)
                 episode_rewards_batch.append(episode_reward)
                 episode_lengths_batch.append(episode_length)
-                
-
         
         collection_time = time.time() - start_time
         self.wandb_logger.log_experience_collection(
@@ -194,18 +198,39 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        step_pbar = tqdm(range(num_steps), desc="Training Tokenizer", leave=False)
-        for step in step_pbar:
-            try:
-                batch = self.buffer.sample_sequences(
-                    self.config.buffer.batch_size,
-                    self.config.buffer.sequence_length
-                )
-            except ValueError:
+        # Create batch sampler
+        batch_sampler = BatchSampler(
+            self.train_dataset,
+            num_steps,
+            self.config.data.batch_size,
+            self.config.data.sequence_length,
+            can_sample_beyond_end=True
+        )
+        batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+            key='tokenizer', 
+            alpha=1.0  # Priority alpha
+        )
+        
+        # Create data loader
+        from torch.utils.data import DataLoader
+        loader = DataLoader(
+            self.train_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=0,  # Set to 0 for CartPole simplicity
+            collate_fn=collate_segments_to_batch,
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        
+        step_pbar = tqdm(enumerate(loader), total=num_steps, desc="Training Tokenizer", leave=False)
+        for step, batch in step_pbar:
+            if step >= num_steps:
                 break
                 
-            obs = batch['observations'][:, :-1]
-            actions = batch['actions'][:, :-1]
+            batch = batch.to(self.device)
+            
+            # Extract sequences (remove last observation as we predict next)
+            obs = batch.observations[:, :-1]
+            actions = batch.actions[:, :-1]
             
             tokenizer_output = self.tokenizer(obs, actions)
             
@@ -219,8 +244,17 @@ class DeltaIrisTrainer:
             loss_dict = {k: v.item() for k, v in tokenizer_output['losses'].items()}
             losses.append(loss_dict)
             
-            if step % 50 == 0:
-                self.tokenizer._sanity_check(tokenizer_output)
+            # Update episode counts for priority sampling
+            for segment_id in batch.segment_ids:
+                self.episode_count_manager.increment_episode_count('tokenizer', segment_id.episode_id)
+            
+            if step % 50 == 0 and step > 0:
+                # Update probabilities for next batch
+                batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+                    key='tokenizer', alpha=1.0
+                )
+                if hasattr(self.tokenizer, '_sanity_check'):
+                    self.tokenizer._sanity_check(tokenizer_output)
         
         training_time = time.time() - start_time
         self.wandb_logger.log_tokenizer_training(losses, training_time)
@@ -240,29 +274,49 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        step_pbar = tqdm(range(num_steps), desc="Training World Model", leave=False)
-        for step in step_pbar:
-            try:
-                batch = self.buffer.sample_sequences(
-                    self.config.buffer.batch_size,
-                    self.config.buffer.sequence_length
-                )
-            except ValueError:
+        # Create batch sampler
+        batch_sampler = BatchSampler(
+            self.train_dataset,
+            num_steps,
+            self.config.data.batch_size,
+            self.config.data.sequence_length,
+            can_sample_beyond_end=True
+        )
+        batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+            key='world_model', 
+            alpha=1.0
+        )
+        
+        # Create data loader
+        from torch.utils.data import DataLoader
+        loader = DataLoader(
+            self.train_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=0,
+            collate_fn=collate_segments_to_batch,
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        
+        step_pbar = tqdm(enumerate(loader), total=num_steps, desc="Training World Model", leave=False)
+        for step, batch in step_pbar:
+            if step >= num_steps:
                 break
                 
+            batch = batch.to(self.device)
+            
             with torch.no_grad():
-                obs = batch['observations'][:, :-1]
-                actions = batch['actions'][:, :-1]
+                obs = batch.observations[:, :-1]
+                actions = batch.actions[:, :-1]
                 tokens = self.tokenizer.get_tokens(obs, actions)
                 
             target_seq_len = tokens.shape[1] - 1
             targets = {
                 'next_tokens': tokens[:, 1:1+target_seq_len],
-                'rewards': batch['rewards'][:, 1:1+target_seq_len],
-                'dones': batch['dones'][:, 1:1+target_seq_len].float()
+                'rewards': batch.rewards[:, 1:1+target_seq_len],
+                'dones': batch.ends[:, 1:1+target_seq_len].float()  # Convert ends to float
             }
             
-            actions_for_wm = batch['actions'][:, :target_seq_len]
+            actions_for_wm = batch.actions[:, :target_seq_len]
             actions_discrete = actions_for_wm[:, :, 0].long() if actions_for_wm.dim() > 2 else actions_for_wm.long()
             
             predictions = self.world_model(tokens[:, :-1], actions_discrete)
@@ -278,8 +332,16 @@ class DeltaIrisTrainer:
             loss_values = {k: v.item() for k, v in loss_dict.items()}
             losses.append(loss_values)
             
-            if step % 50 == 0:
-                self.world_model._sanity_check(predictions, targets)
+            # Update episode counts
+            for segment_id in batch.segment_ids:
+                self.episode_count_manager.increment_episode_count('world_model', segment_id.episode_id)
+            
+            if step % 50 == 0 and step > 0:
+                batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+                    key='world_model', alpha=1.0
+                )
+                if hasattr(self.world_model, '_sanity_check'):
+                    self.world_model._sanity_check(predictions, targets)
         
         training_time = time.time() - start_time
         self.wandb_logger.log_world_model_training(losses, training_time)
@@ -300,17 +362,38 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        step_pbar = tqdm(range(num_steps), desc="Training Actor-Critic", leave=False)
-        for step in step_pbar:
-            try:
-                batch = self.buffer.sample_sequences(
-                    self.config.buffer.batch_size,
-                    1
-                )
-            except ValueError:
+        # Create batch sampler (smaller sequence length for actor-critic burn-in)
+        batch_sampler = BatchSampler(
+            self.train_dataset,
+            num_steps,
+            self.config.data.batch_size,
+            sequence_length=1,  # Single timestep for initial state
+            can_sample_beyond_end=False
+        )
+        batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+            key='actor_critic', 
+            alpha=1.0
+        )
+        
+        # Create data loader
+        from torch.utils.data import DataLoader
+        loader = DataLoader(
+            self.train_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=0,
+            collate_fn=collate_segments_to_batch,
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        
+        step_pbar = tqdm(enumerate(loader), total=num_steps, desc="Training Actor-Critic", leave=False)
+        for step, batch in step_pbar:
+            if step >= num_steps:
                 break
                 
-            initial_obs = batch['observations'][:, 0]
+            batch = batch.to(self.device)
+            
+            initial_obs = batch.observations[:, 0]
+            initial_actions = batch.actions[:, 0]
             
             rollout = self.actor_critic.imagination_rollout(
                 self.world_model,
@@ -332,8 +415,16 @@ class DeltaIrisTrainer:
             loss_values = {k: v.item() if torch.is_tensor(v) else v for k, v in loss_dict.items()}
             losses.append(loss_values)
             
-            if step % 50 == 0:
-                self.actor_critic._sanity_check(rollout_data)
+            # Update episode counts
+            for segment_id in batch.segment_ids:
+                self.episode_count_manager.increment_episode_count('actor_critic', segment_id.episode_id)
+            
+            if step % 50 == 0 and step > 0:
+                batch_sampler.probabilities = self.episode_count_manager.compute_probabilities(
+                    key='actor_critic', alpha=1.0
+                )
+                if hasattr(self.actor_critic, '_sanity_check'):
+                    self.actor_critic._sanity_check(rollout_data)
         
         training_time = time.time() - start_time
         self.wandb_logger.log_actor_critic_training(losses, training_time)
@@ -365,19 +456,16 @@ class DeltaIrisTrainer:
                 max_steps = 1000
                 
                 while not done and episode_length < max_steps:
-                    obs_tensor = torch.tensor(obs, device=self.device, dtype=self.dtype)
-                    action, value, log_prob = self.actor_critic.get_action_and_value(obs_tensor, deterministic=True)
+                    obs_tensor = obs.to(device=self.device, dtype=self.dtype)
+                    action, _, _ = self.actor_critic.get_action_and_value(obs_tensor, deterministic=True)
                     
                     obs, reward, done, truncated, _ = self.single_env.step(action.cpu().numpy())
                     done = done or truncated
                     
                     # Convert tensor values to scalars
-                    if torch.is_tensor(reward):
-                        reward = reward.item()
-                    if torch.is_tensor(done):
-                        done = done.item()
-                    if torch.is_tensor(truncated):
-                        truncated = truncated.item()
+                    reward = reward.item()
+                    done = done.item()
+                    truncated = truncated.item()
                     
                     episode_reward += reward
                     episode_length += 1
@@ -402,8 +490,13 @@ class DeltaIrisTrainer:
         
         all_losses = {**tokenizer_losses, **world_model_losses, **actor_critic_losses}
         
-        buffer_stats = self.buffer.get_stats()
-        all_losses.update({f'buffer_{k}': v for k, v in buffer_stats.items()})
+        # Get dataset stats instead of buffer stats
+        dataset_stats = {
+            'num_episodes': self.train_dataset.num_episodes,
+            'num_steps': self.train_dataset.num_steps,
+            'cache_size': len(self.train_dataset._episode_cache)
+        }
+        all_losses.update({f'dataset_{k}': v for k, v in dataset_stats.items()})
         
         epoch_time = time.time() - start_time
         all_losses['epoch_time'] = epoch_time
@@ -419,9 +512,8 @@ class DeltaIrisTrainer:
             'action_dim': self.action_dim,
             'device': str(self.device),
             'epochs': self.config.epochs,
-            'buffer_capacity': self.config.buffer.capacity,
-            'batch_size': self.config.buffer.batch_size,
-            'sequence_length': self.config.buffer.sequence_length
+            'batch_size': self.config.data.batch_size,
+            'sequence_length': self.config.data.sequence_length
         })
         
         best_eval_reward = float('-inf')
@@ -443,8 +535,13 @@ class DeltaIrisTrainer:
                     self.wandb_logger.log_best_performance(best_eval_reward, epoch)
                     self.save_checkpoint(f"best_model_epoch_{epoch}.pt")
             
-            buffer_stats = self.buffer.get_stats()
-            timing_stats = {}
+            # Get dataset stats instead of buffer stats
+            dataset_stats = {
+                'num_episodes': self.train_dataset.num_episodes,
+                'num_steps': self.train_dataset.num_steps,
+                'cache_size': len(self.train_dataset._episode_cache)
+            }
+            timing_stats = {'epoch_time': losses.get('epoch_time', 0)}
             
             # Log learning rates
             self.wandb_logger.log_learning_rates(
@@ -454,7 +551,7 @@ class DeltaIrisTrainer:
                 self.step
             )
             
-            self.wandb_logger.log_epoch_summary(epoch, losses, buffer_stats, 
+            self.wandb_logger.log_epoch_summary(epoch, losses, dataset_stats, 
                                               losses.get('epoch_time', 0), timing_stats)
                 
             if epoch % 100 == 0:
@@ -479,9 +576,13 @@ class DeltaIrisTrainer:
         Path("checkpoints").mkdir(exist_ok=True)
         torch.save(checkpoint, f"checkpoints/{filename}")
         
+        # Save dataset info and episode counts
+        self.train_dataset.save_info()
+        self.episode_count_manager.save(Path("checkpoints/episode_counts.pt"))
+        
     def load_checkpoint(self, filename: str):
         """Load training checkpoint"""
-        checkpoint = torch.load(f"checkpoints/{filename}", map_location=self.device)
+        checkpoint = torch.load(f"checkpoints/{filename}", map_location=self.device, weights_only=False)
         
         self.epoch = checkpoint['epoch']
         self.tokenizer.load_state_dict(checkpoint['tokenizer'])
@@ -490,3 +591,8 @@ class DeltaIrisTrainer:
         self.tokenizer_optimizer.load_state_dict(checkpoint['tokenizer_optimizer'])
         self.world_model_optimizer.load_state_dict(checkpoint['world_model_optimizer'])
         self.actor_critic_optimizer.load_state_dict(checkpoint['actor_critic_optimizer'])
+        
+        # Load episode counts if available
+        episode_counts_path = Path("checkpoints/episode_counts.pt")
+        if episode_counts_path.exists():
+            self.episode_count_manager.load(episode_counts_path)

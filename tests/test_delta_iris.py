@@ -5,12 +5,22 @@ Test script for Delta-IRIS implementation
 import torch
 import sys
 import os
+import tempfile
+import shutil
 
-from agent.config import TrainerConfig, TokenizerConfig, WorldModelConfig, ActorCriticConfig, BufferConfig
-from agent.buffer import ExperienceBuffer, Episode
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from agent.config import TrainerConfig, TokenizerConfig, WorldModelConfig, ActorCriticConfig
 from agent.tokenizer import Tokenizer
 from agent.world_model import WorldModel
 from agent.actor_critic import ActorCritic
+from data.episode import Episode
+from data.segment import Segment
+from data.batch import Batch
+from data.dataset import EpisodeDataset
+from data.sampler import BatchSampler
+from data.utils import make_segment
 
 def test_components():
     """Test individual components"""

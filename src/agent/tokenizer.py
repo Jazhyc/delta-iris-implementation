@@ -1,6 +1,7 @@
 """
 MLP-based Tokenizer for Delta-IRIS
 Adapted for one-hot encoded environments
+Legacy implementation - use src.tokenizer.DeltaIrisTokenizer for enhanced features
 """
 
 import torch
@@ -9,6 +10,13 @@ import torch.nn.functional as F
 from typing import Dict, Tuple
 import logging
 from .config import TokenizerConfig
+
+# Import enhanced tokenizer
+try:
+    from ..tokenizer import DeltaIrisTokenizer, DeltaTokenizerConfig
+    ENHANCED_TOKENIZER_AVAILABLE = True
+except ImportError:
+    ENHANCED_TOKENIZER_AVAILABLE = False
 
 
 class VectorQuantizer(nn.Module):
@@ -27,29 +35,30 @@ class VectorQuantizer(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Args:
-            x: [batch_size, seq_len, embedding_dim]
+            x: [..., embedding_dim]
         Returns:
             quantized: quantized vectors
             indices: quantization indices  
             losses: dictionary of losses
         """
-        batch_size, seq_len, embed_dim = x.shape
+        original_shape = x.shape
+        embed_dim = original_shape[-1]
         
         # Flatten for quantization
-        x_flat = x.view(-1, embed_dim)  # [batch_size * seq_len, embed_dim]
+        x_flat = x.view(-1, embed_dim)  # [total_elements, embed_dim]
         
         # Compute distances to embeddings
-        distances = torch.cdist(x_flat, self.embeddings.weight)  # [batch_size * seq_len, num_embeddings]
+        distances = torch.cdist(x_flat, self.embeddings.weight)  # [total_elements, num_embeddings]
         
         # Get closest embedding indices
-        indices = torch.argmin(distances, dim=1)  # [batch_size * seq_len]
+        indices = torch.argmin(distances, dim=1)  # [total_elements]
         
         # Get quantized vectors
-        quantized = self.embeddings(indices)  # [batch_size * seq_len, embed_dim]
+        quantized = self.embeddings(indices)  # [total_elements, embed_dim]
         
-        # Reshape back
-        quantized = quantized.view(batch_size, seq_len, embed_dim)
-        indices = indices.view(batch_size, seq_len)
+        # Reshape back to original shape
+        quantized = quantized.view(original_shape)
+        indices = indices.view(original_shape[:-1])  # Remove last dimension (embedding_dim)
         
         # Compute losses
         commitment_loss = F.mse_loss(x, quantized.detach()) * self.commitment_cost
@@ -87,8 +96,23 @@ class MLPEncoder(nn.Module):
         # Ensure tensors are on the same device and dtype as the model
         obs = obs.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
         action = action.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
+        
+        # Handle different tensor shapes
+        original_shape = None
+        if obs.dim() == 3 and action.dim() == 3:
+            # [batch, seq, dim] -> flatten for processing
+            original_shape = obs.shape[:2]  # Store batch_size, seq_len
+            obs = obs.view(-1, obs.shape[-1])
+            action = action.view(-1, action.shape[-1])
+        
         x = torch.cat([obs, action], dim=-1)
-        return self.net(x)
+        output = self.net(x)
+        
+        # Reshape back to sequence format if needed
+        if original_shape is not None:
+            output = output.view(*original_shape, -1)
+            
+        return output
 
 
 class MLPDecoder(nn.Module):
@@ -111,8 +135,23 @@ class MLPDecoder(nn.Module):
         # Ensure tensors are on the same device and dtype as the model
         latent = latent.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
         action = action.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
+        
+        # Handle different tensor shapes
+        original_shape = None
+        if latent.dim() == 3 and action.dim() == 3:
+            # [batch, seq, dim] -> flatten for processing
+            original_shape = latent.shape[:2]  # Store batch_size, seq_len
+            latent = latent.view(-1, latent.shape[-1])
+            action = action.view(-1, action.shape[-1])
+        
         x = torch.cat([latent, action], dim=-1)
-        return self.net(x)
+        output = self.net(x)
+        
+        # Reshape back to sequence format if needed
+        if original_shape is not None:
+            output = output.view(*original_shape, -1)
+            
+        return output
 
 
 class Tokenizer(nn.Module):
@@ -123,6 +162,20 @@ class Tokenizer(nn.Module):
         self.config = config
         self.logger = logging.getLogger(__name__)
         
+        # Try to use enhanced tokenizer if available and config supports it
+        if ENHANCED_TOKENIZER_AVAILABLE and hasattr(config, 'spatial_grid_size'):
+            self.logger.info("Using enhanced Delta-IRIS tokenizer")
+            self._use_enhanced = True
+            # Convert config to enhanced config
+            enhanced_config = DeltaTokenizerConfig(**vars(config))
+            self.enhanced_tokenizer = DeltaIrisTokenizer(enhanced_config)
+        else:
+            self.logger.info("Using legacy MLP tokenizer")
+            self._use_enhanced = False
+            self._init_legacy_components(config)
+    
+    def _init_legacy_components(self, config: TokenizerConfig):
+        """Initialize legacy tokenizer components"""
         # Encoder: (obs, action) -> latent
         self.encoder = MLPEncoder(
             obs_dim=config.obs_dim,
@@ -147,15 +200,24 @@ class Tokenizer(nn.Module):
         
     def encode(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Encode observations and actions to continuous latents"""
-        return self.encoder(obs, actions)
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.encode(obs, actions)
+        else:
+            return self.encoder(obs, actions)
         
     def quantize(self, latents: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Quantize continuous latents to discrete tokens"""
-        return self.quantizer(latents)
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.quantize(latents)
+        else:
+            return self.quantizer(latents)
         
     def decode(self, quantized_latents: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Decode quantized latents and actions to observations"""
-        return self.decoder(quantized_latents, actions)
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.decode(quantized_latents, actions)
+        else:
+            return self.decoder(quantized_latents, actions)
         
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -168,6 +230,13 @@ class Tokenizer(nn.Module):
         Returns:
             Dictionary with reconstructed observations, tokens, and losses
         """
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.forward(obs, actions)
+        else:
+            return self._legacy_forward(obs, actions)
+    
+    def _legacy_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Legacy forward pass implementation"""
         # Encode to continuous latents
         latents = self.encode(obs, actions)
         
@@ -199,17 +268,23 @@ class Tokenizer(nn.Module):
         
     def get_tokens(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Get discrete tokens without gradients"""
-        with torch.no_grad():
-            latents = self.encode(obs, actions)
-            _, tokens, _ = self.quantize(latents)
-            return tokens
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.get_spatial_tokens(obs, actions)
+        else:
+            with torch.no_grad():
+                latents = self.encode(obs, actions)
+                _, tokens, _ = self.quantize(latents)
+                return tokens
             
     def decode_tokens(self, tokens: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Decode tokens back to observations"""
-        with torch.no_grad():
-            # Get quantized latents from tokens
-            quantized_latents = self.quantizer.embeddings(tokens)
-            return self.decode(quantized_latents, actions)
+        if self._use_enhanced:
+            return self.enhanced_tokenizer.decode_spatial_tokens(tokens, actions)
+        else:
+            with torch.no_grad():
+                # Get quantized latents from tokens
+                quantized_latents = self.quantizer.embeddings(tokens)
+                return self.decode(quantized_latents, actions)
             
     def _sanity_check(self, batch_data: Dict[str, torch.Tensor]):
         """Perform sanity checks on tokenizer outputs"""
@@ -234,3 +309,12 @@ class Tokenizer(nn.Module):
                 self.logger.debug(f"Reconstruction error: {recon_error:.6f}")
         else:
             self._step_count = 1
+    
+    # Enhanced tokenizer API compatibility
+    def get_spatial_tokens(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Get spatial tokens (enhanced API compatibility)"""
+        return self.get_tokens(obs, actions)
+    
+    def decode_spatial_tokens(self, tokens: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Decode spatial tokens (enhanced API compatibility)"""
+        return self.decode_tokens(tokens, actions)

@@ -7,7 +7,7 @@ import torch
 # Import new Delta-IRIS components
 from agent.config import (
     TrainerConfig, TokenizerConfig, WorldModelConfig, 
-    ActorCriticConfig, BufferConfig
+    ActorCriticConfig, DataConfig
 )
 from trainer import DeltaIrisTrainer
 
@@ -82,8 +82,7 @@ def create_config_from_hydra(cfg: DictConfig) -> TrainerConfig:
         learning_rate=cfg.model.actor_critic.learning_rate
     )
     
-    buffer_config = BufferConfig(
-        capacity=cfg.model.buffer.capacity,
+    data_config = DataConfig(
         sequence_length=cfg.model.buffer.sequence_length,
         batch_size=cfg.model.buffer.batch_size
     )
@@ -98,7 +97,7 @@ def create_config_from_hydra(cfg: DictConfig) -> TrainerConfig:
         tokenizer=tokenizer_config,
         world_model=world_model_config,
         actor_critic=actor_critic_config,
-        buffer=buffer_config
+        data=data_config
     )
     
     return trainer_config
