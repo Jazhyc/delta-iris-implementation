@@ -32,7 +32,7 @@ buffer:
   batch_size: 8  # Reduced for memory efficiency
 
 training:
-  epochs: 10
+  epochs: 1
   steps_per_epoch: 1000
   eval_frequency: 10
   device: cuda
