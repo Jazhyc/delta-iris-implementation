@@ -1,0 +1,39 @@
+# Model configuration for continuous control environments
+tokenizer:
+  hidden_dim: 256
+  latent_dim: 64
+  num_tokens: 4
+  codebook_size: 1024
+  learning_rate: 1e-4
+
+world_model:
+  vocab_size: 1024
+  latent_dim: 64
+  hidden_dim: 512
+  num_layers: 4
+  num_heads: 8
+  sequence_length: 64
+  learning_rate: 1e-4
+
+actor_critic:
+  hidden_dim: 256
+  imagination_horizon: 15
+  gamma: 0.99
+  lambda_gae: 0.95
+  entropy_coef: 0.01
+  learning_rate: 1e-4
+
+buffer:
+  capacity: 100000
+  sequence_length: 64
+  batch_size: 16  # Reduced for memory efficiency
+
+training:
+  epochs: 1000
+  steps_per_epoch: 1000
+  eval_frequency: 10
+  device: cuda
+  dtype: bfloat16
+  gradient_accumulation_steps: 2  # Effective batch size = batch_size * gradient_accumulation_steps
+  max_grad_norm: 1.0
+  memory_efficient: true

@@ -10,7 +10,7 @@ from gymnasium.wrappers.array_conversion import (
     module_namespace,
 )
 
-# Preferably this should be configurable but I'm not certain what jax.devices really is
+# Preferably this should be configurable but I'm not certain how to configure jax
 device_jax = jax.devices()[0]
 device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
