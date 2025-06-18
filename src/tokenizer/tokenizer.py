@@ -11,7 +11,7 @@ import logging
 import math
 from dataclasses import dataclass
 
-from ..agent.config import TokenizerConfig
+from agent.config import TokenizerConfig
 
 
 @dataclass
@@ -54,8 +54,13 @@ class ExponentialMovingAverage(nn.Module):
         indices_flat = indices.view(-1)
         encodings_flat = encodings.view(-1, self.embedding_dim)
         
-        # Create one-hot encodings for cluster assignment
-        one_hot = F.one_hot(indices_flat, self.num_embeddings).float()
+        # Ensure EMA buffers match the dtype of encodings
+        if self.cluster_size.dtype != encodings_flat.dtype:
+            self.cluster_size = self.cluster_size.to(encodings_flat.dtype)
+            self.embed_avg = self.embed_avg.to(encodings_flat.dtype)
+        
+        # Create one-hot encodings for cluster assignment - match encodings dtype
+        one_hot = F.one_hot(indices_flat, self.num_embeddings).to(encodings_flat.dtype)
         
         # Update cluster size
         cluster_size = one_hot.sum(0)
@@ -280,7 +285,7 @@ class EnhancedVectorQuantizer(nn.Module):
             self.ema.update(indices, x_flat, self.embeddings)
             # Only commitment loss for EMA
             commitment_loss = F.mse_loss(x, quantized.detach()) * self.commitment_cost
-            codebook_loss = torch.tensor(0.0, device=x.device)
+            codebook_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
         else:
             # Standard VQ losses
             commitment_loss = F.mse_loss(x, quantized.detach()) * self.commitment_cost

@@ -6,7 +6,7 @@ import torch
 
 # Import new Delta-IRIS components
 from agent.config import (
-    TrainerConfig, TokenizerConfig, WorldModelConfig, 
+    TrainerConfig, DeltaTokenizerConfig, WorldModelConfig, 
     ActorCriticConfig, DataConfig
 )
 from trainer import DeltaIrisTrainer
@@ -50,16 +50,27 @@ def create_config_from_hydra(cfg: DictConfig) -> TrainerConfig:
     
     # Create component configs from Hydra config
     print(f"DEBUG: Creating tokenizer config with obs_dim={obs_dim}, action_dim={action_dim}")
-    tokenizer_config = TokenizerConfig(
+    tokenizer_config = DeltaTokenizerConfig(
         obs_dim=obs_dim,
         action_dim=action_dim,
         hidden_dim=cfg.model.tokenizer.hidden_dim,
         latent_dim=cfg.model.tokenizer.latent_dim,
         num_tokens=cfg.model.tokenizer.num_tokens,
         codebook_size=cfg.model.tokenizer.codebook_size,
-        learning_rate=cfg.model.tokenizer.learning_rate
+        learning_rate=cfg.model.tokenizer.learning_rate,
+        # Add the missing DeltaTokenizerConfig fields with defaults
+        spatial_grid_size=8,
+        patch_size=4,
+        context_length=4,
+        delta_encoding=True,
+        use_exponential_moving_average=True,
+        ema_decay=0.99,
+        commitment_cost=0.25,
+        use_spatial_attention=True,
+        spatial_attention_heads=4
     )
     
+    # Create simple MLP-based world model config for non-image environments
     world_model_config = WorldModelConfig(
         vocab_size=cfg.model.world_model.vocab_size,
         action_dim=action_dim,

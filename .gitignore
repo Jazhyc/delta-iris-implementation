@@ -203,3 +203,4 @@ presentation
 report
 checkpoints
 .prompt
+*.pt

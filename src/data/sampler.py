@@ -18,7 +18,8 @@ class BatchSampler(torch.utils.data.Sampler):
         sequence_length: int, 
         can_sample_beyond_end: bool
     ) -> None:
-        super().__init__(dataset)
+        # Don't pass dataset to super() to avoid the deprecated data_source warning
+        super().__init__(data_source=None)
         self.dataset = dataset
         self.probabilities = None  # Will be set by episode count manager
         self.num_steps_per_epoch = num_steps_per_epoch

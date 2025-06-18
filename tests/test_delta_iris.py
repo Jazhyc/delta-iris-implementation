@@ -15,6 +15,7 @@ from agent.config import TrainerConfig, TokenizerConfig, WorldModelConfig, Actor
 from agent.tokenizer import Tokenizer
 from agent.world_model import WorldModel
 from agent.actor_critic import ActorCritic
+from agent.buffer import ExperienceBuffer
 from data.episode import Episode
 from data.segment import Segment
 from data.batch import Batch
