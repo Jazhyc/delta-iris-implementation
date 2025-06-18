@@ -6,6 +6,6 @@ defaults:
 wandb:
   entity: personal_experiments
   project: DeltaIris
-  mode: offline
+  mode: online
 
 seed: 42

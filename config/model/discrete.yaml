@@ -1,8 +1,6 @@
 # Model configuration for discrete control environments
 environment:
   type: discrete  # continuous or discrete
-  action_discretization_bins: null  # Not needed for discrete environments
-  action_range: null  # Not needed for discrete environments
 
 tokenizer:
   hidden_dim: 256
@@ -34,7 +32,7 @@ buffer:
   batch_size: 8  # Reduced for memory efficiency
 
 training:
-  epochs: 1000
+  epochs: 10
   steps_per_epoch: 1000
   eval_frequency: 10
   device: cuda

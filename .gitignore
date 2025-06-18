@@ -201,4 +201,5 @@ outputs
 wandb
 presentation
 report
+checkpoints
 .prompt

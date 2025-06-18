@@ -29,20 +29,22 @@ def create_config_from_hydra(cfg: DictConfig) -> TrainerConfig:
     # Determine if environment is continuous or discrete
     print(f"DEBUG: env.action_space = {env.action_space}")
     print(f"DEBUG: type(env.action_space) = {type(env.action_space)}")
-    print(f"DEBUG: hasattr(env.action_space, 'n') = {hasattr(env.action_space, 'n')}")
     
-    is_continuous = not hasattr(env.action_space, 'n')
-    print(f"DEBUG: is_continuous = {is_continuous}")
-    
-    if is_continuous:
-        # For continuous environments, discretize actions
-        action_dim = cfg.model.environment.action_discretization_bins
-        print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, continuous actions discretized to {action_dim} bins")
-    else:
-        # For discrete environments, use the action space size
-        print(f"DEBUG: env.action_space.n = {env.action_space.n}")
+    # Handle different action space types
+    if hasattr(env.action_space, 'n'):
+        # Standard discrete action space (e.g., Discrete(4))
         action_dim = env.action_space.n
         print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, discrete action_dim={action_dim}")
+    elif hasattr(env.action_space, 'nvec'):
+        # MultiDiscrete action space (e.g., MultiDiscrete([2]))
+        action_dim = int(env.action_space.nvec[0])  # Use first dimension
+        print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, multi-discrete action_dim={action_dim}")
+    elif hasattr(env.action_space, 'shape'):
+        # Continuous action space (e.g., Box) - not supported for now
+        print(f"Environment {cfg.env.name}: continuous action space detected - not supported yet")
+        raise ValueError("Continuous action spaces are not supported yet. Please use a discrete environment like CartPole-v1.")
+    else:
+        raise ValueError(f"Unknown action space type: {type(env.action_space)}")
     
     print(f"DEBUG: Final action_dim = {action_dim}")
     

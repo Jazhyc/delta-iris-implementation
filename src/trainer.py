@@ -11,13 +11,13 @@ import logging
 import wandb
 import time
 from pathlib import Path
+from tqdm import tqdm
 
 from agent.config import TrainerConfig
 from agent.buffer import ExperienceBuffer, Episode
 from agent.tokenizer import Tokenizer
 from agent.world_model import WorldModel
 from agent.actor_critic import ActorCritic
-from agent.action_utils import create_action_discretizer
 from env import make_env
 
 
@@ -35,7 +35,7 @@ class DeltaIrisTrainer:
         self.logger = logging.getLogger(__name__)
         
         # Environment setup - use hydra config if available
-        env_name = hydra_config.env.name if hydra_config else "Pendulum-v1"
+        env_name = hydra_config.env.name
         self.env, _ = make_env(env_name, num_envs=1)  # Single env for initialization
         
         # Get observation dimension properly
@@ -46,17 +46,19 @@ class DeltaIrisTrainer:
             self.obs_dim = self.env.observation_space.n
         
         # Determine environment type and action space
-        self.is_continuous = not hasattr(self.env.action_space, 'n')
-        if self.is_continuous:
-            # For continuous action spaces, get the action feature dimension
-            if hasattr(self.env.action_space, 'shape') and len(self.env.action_space.shape) > 0:
-                self.raw_action_dim = self.env.action_space.shape[-1]
-            else:
-                self.raw_action_dim = 1
-            self.action_dim = config.world_model.action_dim  # Discretized action dim
-        else:
+        if hasattr(self.env.action_space, 'n'):
+            # Standard discrete action space (e.g., Discrete(4))
             self.raw_action_dim = self.env.action_space.n
             self.action_dim = self.env.action_space.n
+        elif hasattr(self.env.action_space, 'nvec'):
+            # MultiDiscrete action space (e.g., MultiDiscrete([2]))
+            self.raw_action_dim = int(self.env.action_space.nvec[0])
+            self.action_dim = int(self.env.action_space.nvec[0])
+        elif hasattr(self.env.action_space, 'shape'):
+            # Continuous action space (e.g., Box) - not supported
+            raise ValueError("Continuous action spaces are not supported yet. Please use a discrete environment.")
+        else:
+            raise ValueError(f"Unknown action space type: {type(self.env.action_space)}")
             
         self.logger.info(f"Environment: {env_name}, obs_dim={self.obs_dim}")
         self.logger.info(f"Action space: discrete, action_dim={self.action_dim}")
@@ -114,7 +116,9 @@ class DeltaIrisTrainer:
         self.actor_critic.eval()
         
         with torch.no_grad():
-            for episode_idx in range(num_episodes):
+            # Add progress bar for experience collection
+            episode_pbar = tqdm(range(num_episodes), desc="Collecting Experience", leave=False)
+            for episode_idx in episode_pbar:
                 obs, _ = self.single_env.reset()
                 
                 # Single environment - no vectorization handling needed
@@ -173,6 +177,12 @@ class DeltaIrisTrainer:
                 episodes.append(episode)
                 self.buffer.add_episode(episode)
                 
+                # Update progress bar with episode stats
+                episode_pbar.set_postfix({
+                    'ep_reward': f"{sum(episode_rewards):.2f}",
+                    'ep_length': f"{len(episode_rewards)}"
+                })
+                
         self.logger.info(f"Collected {len(episodes)} episodes")
         return episodes
         
@@ -182,7 +192,9 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        for step in range(num_steps):
+        # Add progress bar for tokenizer training
+        step_pbar = tqdm(range(num_steps), desc="Training Tokenizer", leave=False)
+        for step in step_pbar:
             # Sample batch from buffer
             try:
                 batch = self.buffer.sample_sequences(
@@ -195,12 +207,9 @@ class DeltaIrisTrainer:
                 
             # Forward pass
             obs = batch['observations'][:, :-1]  # All but last
-            actions_continuous = batch['actions'][:, :-1]   # All but last (continuous actions)
+            actions = batch['actions'][:, :-1]   # All but last (discrete actions)
             
-            # Discretize actions for tokenizer (tokenizer expects discrete actions)
-            actions_discrete = self.discretize_actions(actions_continuous)
-            
-            tokenizer_output = self.tokenizer(obs, actions_discrete)
+            tokenizer_output = self.tokenizer(obs, actions)
             
             # Compute loss
             total_loss = tokenizer_output['losses']['total_tokenizer_loss']
@@ -212,6 +221,13 @@ class DeltaIrisTrainer:
             self.tokenizer_optimizer.step()
             
             losses.append({k: v.item() for k, v in tokenizer_output['losses'].items()})
+            
+            # Update progress bar
+            if losses:
+                step_pbar.set_postfix({
+                    'loss': f"{total_loss.item():.4f}",
+                    'rec_loss': f"{losses[-1].get('reconstruction_loss_l2', 0):.4f}"
+                })
             
             # Sanity check
             if step % 50 == 0:
@@ -232,7 +248,9 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        for step in range(num_steps):
+        # Add progress bar for world model training
+        step_pbar = tqdm(range(num_steps), desc="Training World Model", leave=False)
+        for step in step_pbar:
             # Sample batch from buffer
             try:
                 batch = self.buffer.sample_sequences(
@@ -257,16 +275,10 @@ class DeltaIrisTrainer:
                 'dones': batch['dones'][:, 1:1+target_seq_len].float()
             }
             
-            # Discretize actions for world model
+            # Actions for world model (discrete actions)
             actions_for_wm = batch['actions'][:, :target_seq_len]
-            if self.action_discretizer:
-                # For continuous environments, discretize to bins
-                actions_discrete = self.action_discretizer.discretize(actions_for_wm)
-                # Take first action dimension if multi-dimensional 
-                actions_discrete = actions_discrete[:, :, 0] if actions_discrete.dim() > 2 else actions_discrete
-            else:
-                # For discrete environments, use raw actions
-                actions_discrete = actions_for_wm[:, :, 0].long() if actions_for_wm.dim() > 2 else actions_for_wm.long()
+            # For discrete environments, use raw actions
+            actions_discrete = actions_for_wm[:, :, 0].long() if actions_for_wm.dim() > 2 else actions_for_wm.long()
             
             # Forward pass
             predictions = self.world_model(tokens[:, :-1], actions_discrete)
@@ -282,6 +294,13 @@ class DeltaIrisTrainer:
             self.world_model_optimizer.step()
             
             losses.append({k: v.item() for k, v in loss_dict.items()})
+            
+            # Update progress bar
+            if losses:
+                step_pbar.set_postfix({
+                    'loss': f"{total_loss.item():.4f}",
+                    'next_token_loss': f"{losses[-1].get('next_token_loss', 0):.4f}"
+                })
             
             # Sanity check
             if step % 50 == 0:
@@ -303,7 +322,9 @@ class DeltaIrisTrainer:
         
         losses = []
         
-        for step in range(num_steps):
+        # Add progress bar for actor-critic training
+        step_pbar = tqdm(range(num_steps), desc="Training Actor-Critic", leave=False)
+        for step in step_pbar:
             # Sample initial states from buffer
             try:
                 batch = self.buffer.sample_sequences(
@@ -338,6 +359,14 @@ class DeltaIrisTrainer:
             
             losses.append({k: v.item() if torch.is_tensor(v) else v for k, v in loss_dict.items()})
             
+            # Update progress bar
+            if losses:
+                step_pbar.set_postfix({
+                    'loss': f"{total_loss.item():.4f}",
+                    'value_loss': f"{losses[-1].get('value_loss', 0):.4f}",
+                    'policy_loss': f"{losses[-1].get('policy_loss', 0):.4f}"
+                })
+            
             # Sanity check
             if step % 50 == 0:
                 self.actor_critic._sanity_check(rollout_data)
@@ -358,8 +387,10 @@ class DeltaIrisTrainer:
         eval_lengths = []
         
         with torch.no_grad():
-            for _ in range(10):  # 10 evaluation episodes
-                obs, _ = self.vec_env.reset()
+            # Add progress bar for evaluation
+            eval_pbar = tqdm(range(10), desc="Evaluating Policy", leave=False)
+            for eval_ep in eval_pbar:  # 10 evaluation episodes
+                obs, _ = self.single_env.reset()
                 episode_reward = 0
                 episode_length = 0
                 done = False
@@ -369,14 +400,28 @@ class DeltaIrisTrainer:
                     obs_tensor = torch.tensor(obs, device=self.device, dtype=self.dtype)
                     action, _, _ = self.actor_critic.get_action_and_value(obs_tensor, deterministic=True)
                     
-                    obs, reward, done, truncated, _ = self.vec_env.step(action.cpu().numpy())
+                    obs, reward, done, truncated, _ = self.single_env.step(action.cpu().numpy())
                     done = done or truncated
+                    
+                    # Convert tensor values to scalars
+                    if torch.is_tensor(reward):
+                        reward = reward.item()
+                    if torch.is_tensor(done):
+                        done = done.item()
+                    if torch.is_tensor(truncated):
+                        truncated = truncated.item()
                     
                     episode_reward += reward
                     episode_length += 1
                     
                 eval_rewards.append(episode_reward)
                 eval_lengths.append(episode_length)
+                
+                # Update progress bar with current episode stats
+                eval_pbar.set_postfix({
+                    'reward': f"{episode_reward:.2f}",
+                    'length': f"{episode_length}"
+                })
                 
         return {
             'eval_mean_reward': sum(eval_rewards) / len(eval_rewards),
@@ -418,7 +463,9 @@ class DeltaIrisTrainer:
         if hasattr(self.config, 'wandb'):
             wandb.init(project="DeltaIris", config=self.config.__dict__)
             
-        for epoch in range(self.config.epochs):
+        # Main training loop with progress bar
+        epoch_pbar = tqdm(range(self.config.epochs), desc="Training Epochs")
+        for epoch in epoch_pbar:
             self.epoch = epoch
             
             # Train epoch
@@ -429,6 +476,14 @@ class DeltaIrisTrainer:
                 eval_metrics = self.evaluate()
                 losses.update(eval_metrics)
                 
+            # Update progress bar with latest metrics
+            epoch_pbar.set_postfix({
+                'tokenizer_loss': f"{losses.get('tokenizer_loss', 0):.4f}",
+                'world_model_loss': f"{losses.get('world_model_loss', 0):.4f}",
+                'actor_critic_loss': f"{losses.get('actor_critic_loss', 0):.4f}",
+                'eval_reward': f"{losses.get('eval_reward', 0):.2f}"
+            })
+            
             # Log metrics
             losses['epoch'] = epoch
             

@@ -84,6 +84,9 @@ class MLPEncoder(nn.Module):
         
     def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Encode observation-action pairs"""
+        # Ensure tensors are on the same device and dtype as the model
+        obs = obs.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
+        action = action.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
         x = torch.cat([obs, action], dim=-1)
         return self.net(x)
 
@@ -105,6 +108,9 @@ class MLPDecoder(nn.Module):
         
     def forward(self, latent: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Decode latent representation and action to observation"""
+        # Ensure tensors are on the same device and dtype as the model
+        latent = latent.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
+        action = action.to(dtype=self.net[0].weight.dtype, device=self.net[0].weight.device)
         x = torch.cat([latent, action], dim=-1)
         return self.net(x)
 
