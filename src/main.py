@@ -8,15 +8,11 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig) -> None:
+    
     # Print the configuration for verification
     print(OmegaConf.to_yaml(cfg))
     
-    # Access configuration values
-    print(f"Environment: {cfg.env}")
-    print(f"Model: {cfg.model}")
-    print(f"Wandb project: {cfg.wandb.project}")
-    
-    env, _ = make_env(cfg.env.name)
+    env, _ = make_env(cfg.env.name, num_envs=cfg.env.num_envs)
     
     action_space = env.action_space
     obs_space = env.observation_space
@@ -31,6 +27,7 @@ def main(cfg: DictConfig) -> None:
         config=OmegaConf.to_container(cfg, resolve=True),
         mode=cfg.wandb.mode,
     )
+    
     
 if __name__ == "__main__":
     main()
