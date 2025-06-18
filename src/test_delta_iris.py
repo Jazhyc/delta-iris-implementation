@@ -63,6 +63,8 @@ def test_components():
         learning_rate=1e-4
     )
     
+    print(f"   World model config: vocab_size={world_model_config.vocab_size}, action_dim={world_model_config.action_dim}")
+    
     world_model = WorldModel(world_model_config).to(device, dtype=dtype)
     
     # Test forward pass
@@ -158,15 +160,34 @@ def test_components():
     with torch.no_grad():
         tokens_batch = tokenizer.get_tokens(obs_batch, actions_batch)
     
+    # Make sure actions have the same sequence length as tokens for world model input
+    actions_continuous = batch['actions'][:, :tokens_batch.shape[1]-1, 0]  # Match sequence length
+    
+    # Targets should match the output sequence length (which is input_length)
+    target_seq_len = tokens_batch.shape[1] - 1  # World model outputs for input sequence length
     targets = {
-        'next_tokens': tokens_batch[:, 1:],
-        'rewards': batch['rewards'][:, 1:],
-        'dones': batch['dones'][:, 1:].float()
+        'next_tokens': tokens_batch[:, 1:1+target_seq_len],  # [4, 14]
+        'rewards': batch['rewards'][:, 1:1+target_seq_len],  # [4, 14] 
+        'dones': batch['dones'][:, 1:1+target_seq_len].float()  # [4, 14]
     }
     
-    # Make sure actions have the same sequence length as tokens for world model input
-    actions_for_wm = batch['actions'][:, :tokens_batch.shape[1]-1, 0].long()  # Match sequence length
+    # Discretize continuous actions into valid bins [0, action_dim-1]
+    # For Pendulum: actions are roughly in [-2, 2], map to [0, action_dim-1]
+    if action_dim == 1:
+        # For single action dimension, all actions map to bin 0
+        actions_for_wm = torch.zeros_like(actions_continuous, dtype=torch.long, device=device)
+    else:
+        # For multi-dimensional, discretize into bins
+        action_min, action_max = -2.0, 2.0  # Typical range for Pendulum
+        actions_normalized = torch.clamp((actions_continuous - action_min) / (action_max - action_min), 0, 1)
+        actions_for_wm = (actions_normalized * (action_dim - 1)).long()
+    
+    print(f"   Actions discretized: range [{actions_for_wm.min()}, {actions_for_wm.max()}], shape: {actions_for_wm.shape}")
+    print(f"   World model input: tokens {tokens_batch[:, :-1].shape}, actions {actions_for_wm.shape}")
+    print(f"   Targets: next_tokens {targets['next_tokens'].shape}, rewards {targets['rewards'].shape}")
+    
     wm_pred = world_model(tokens_batch[:, :-1], actions_for_wm)
+    print(f"   World model predictions: next_token_logits {wm_pred['next_token_logits'].shape}, rewards {wm_pred['reward_predictions'].shape}")
     wm_losses = world_model.compute_loss(wm_pred, targets)
     wm_loss = wm_losses['total_world_model_loss']
     
