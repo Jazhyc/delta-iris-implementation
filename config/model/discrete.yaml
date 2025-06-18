@@ -1,8 +1,8 @@
-# Model configuration for continuous control environments
+# Model configuration for discrete control environments
 environment:
-  type: continuous  # continuous or discrete
-  action_discretization_bins: 5  # Number of bins for discretizing continuous actions
-  action_range: [-2.0, 2.0]  # Expected action range for discretization
+  type: discrete  # continuous or discrete
+  action_discretization_bins: null  # Not needed for discrete environments
+  action_range: null  # Not needed for discrete environments
 
 tokenizer:
   hidden_dim: 256

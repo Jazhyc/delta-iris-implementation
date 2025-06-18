@@ -31,6 +31,9 @@ class JaxToTorchWrapper:
         action = torch_to_jax(action)
         obs, reward, done, truncated, info = self.env.step(action)
         obs = jax_to_torch(obs)
+        reward = jax_to_torch(reward)
+        done = jax_to_torch(done)
+        truncated = jax_to_torch(truncated)
         return obs, reward, done, truncated, info
     
     @property

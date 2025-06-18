@@ -17,14 +17,16 @@ from agent.buffer import ExperienceBuffer, Episode
 from agent.tokenizer import Tokenizer
 from agent.world_model import WorldModel
 from agent.actor_critic import ActorCritic
+from agent.action_utils import create_action_discretizer
 from env import make_env
 
 
 class DeltaIrisTrainer:
     """Main trainer for Delta-IRIS algorithm"""
     
-    def __init__(self, config: TrainerConfig):
+    def __init__(self, config: TrainerConfig, hydra_config=None):
         self.config = config
+        self.hydra_config = hydra_config
         self.device = torch.device(config.device)
         self.dtype = getattr(torch, config.dtype)
         
@@ -32,16 +34,38 @@ class DeltaIrisTrainer:
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         
-        # Create environment to get observation and action dimensions
-        self.env, _ = make_env("Pendulum-v1", num_envs=1)  # Single env for initialization
-        self.obs_dim = self.env.observation_space.shape[0]
-        self.action_dim = self.env.action_space.n if hasattr(self.env.action_space, 'n') else 1
+        # Environment setup - use hydra config if available
+        env_name = hydra_config.env.name if hydra_config else "Pendulum-v1"
+        self.env, _ = make_env(env_name, num_envs=1)  # Single env for initialization
         
-        self.logger.info(f"Environment: obs_dim={self.obs_dim}, action_dim={self.action_dim}")
+        # Get observation dimension properly
+        if hasattr(self.env.observation_space, 'shape') and len(self.env.observation_space.shape) > 0:
+            # For vectorized environments, get the feature dimension (last dimension)
+            self.obs_dim = self.env.observation_space.shape[-1]
+        else:
+            self.obs_dim = self.env.observation_space.n
         
-        # Update configs with environment dimensions
+        # Determine environment type and action space
+        self.is_continuous = not hasattr(self.env.action_space, 'n')
+        if self.is_continuous:
+            # For continuous action spaces, get the action feature dimension
+            if hasattr(self.env.action_space, 'shape') and len(self.env.action_space.shape) > 0:
+                self.raw_action_dim = self.env.action_space.shape[-1]
+            else:
+                self.raw_action_dim = 1
+            self.action_dim = config.world_model.action_dim  # Discretized action dim
+        else:
+            self.raw_action_dim = self.env.action_space.n
+            self.action_dim = self.env.action_space.n
+            
+        self.logger.info(f"Environment: {env_name}, obs_dim={self.obs_dim}")
+        self.logger.info(f"Action space: discrete, action_dim={self.action_dim}")
+        
+        # Update config with correct dimensions
+        print(f"DEBUG: Updating configs with obs_dim={self.obs_dim}, action_dim={self.action_dim}")
         config.tokenizer.obs_dim = self.obs_dim
         config.tokenizer.action_dim = self.action_dim
+        print(f"DEBUG: Tokenizer config after update: obs_dim={config.tokenizer.obs_dim}, action_dim={config.tokenizer.action_dim}")
         config.world_model.action_dim = self.action_dim
         config.actor_critic.obs_dim = self.obs_dim
         config.actor_critic.action_dim = self.action_dim
@@ -69,13 +93,13 @@ class DeltaIrisTrainer:
         self.buffer = ExperienceBuffer(
             capacity=config.buffer.capacity,
             obs_dim=self.obs_dim,
-            action_dim=self.action_dim,
+            action_dim=self.raw_action_dim,  # Buffer stores raw actions
             device=self.device,
             dtype=self.dtype
         )
         
-        # Create vectorized environment for data collection
-        self.vec_env, _ = make_env("Pendulum-v1", num_envs=64)  # Use config from yaml
+        # Create single environment for data collection (simpler than vectorized)
+        self.single_env, _ = make_env(env_name, num_envs=1)
         
         # Training state
         self.epoch = 0
@@ -91,7 +115,10 @@ class DeltaIrisTrainer:
         
         with torch.no_grad():
             for episode_idx in range(num_episodes):
-                obs, _ = self.vec_env.reset()
+                obs, _ = self.single_env.reset()
+                
+                # Single environment - no vectorization handling needed
+                    
                 episode_obs = [obs]
                 episode_actions = []
                 episode_rewards = []
@@ -102,32 +129,45 @@ class DeltaIrisTrainer:
                 max_steps = 1000  # Prevent infinite episodes
                 
                 while not done and step_count < max_steps:
-                    # Convert to tensor
-                    obs_tensor = torch.tensor(obs, device=self.device, dtype=self.dtype)
+                    # Convert obs to proper tensor format
+                    obs_tensor = obs.to(device=self.device, dtype=self.dtype)
                     
                     # Get action from policy
                     action, _, _ = self.actor_critic.get_action_and_value(obs_tensor)
                     action_np = action.cpu().numpy()
                     
                     # Step environment
-                    next_obs, reward, done, truncated, info = self.vec_env.step(action_np)
-                    done = done or truncated
+                    next_obs, reward, done_flag, truncated_flag, info = self.single_env.step(action_np)
                     
-                    # Store transition
+                    # Handle environment outputs (simple boolean logic)
+                    done = bool(done_flag) or bool(truncated_flag)
+                    
+                    # Store transition (simple - everything is PyTorch tensors now)
                     episode_actions.append(action_np)
-                    episode_rewards.append(reward)
+                    episode_rewards.append(float(reward))
                     episode_dones.append(done)
-                    episode_obs.append(next_obs)
                     
+                    episode_obs.append(next_obs)
                     obs = next_obs
                     step_count += 1
                 
-                # Create episode
+                # Create episode from collected data (simple since everything is PyTorch tensors)
+                obs_tensor = torch.stack(episode_obs[:-1])  # All observations from environment
+                actions_tensor = torch.stack([torch.from_numpy(action) for action in episode_actions])  # Actions from numpy
+                rewards_tensor = torch.tensor(episode_rewards, dtype=self.dtype)
+                dones_tensor = torch.tensor(episode_dones, dtype=torch.bool)
+                
+                # Handle potential extra dimensions from vectorized environment
+                if obs_tensor.dim() > 2:  # Should be [seq_len, obs_dim], but might be [seq_len, 1, obs_dim]
+                    obs_tensor = obs_tensor.squeeze(1)  # Remove the singleton batch dimension
+                if actions_tensor.dim() > 2:  # Should be [seq_len, action_dim], but might be [seq_len, 1, action_dim]
+                    actions_tensor = actions_tensor.squeeze(1)  # Remove the singleton batch dimension
+                
                 episode = Episode(
-                    observations=torch.tensor(episode_obs[:-1], device=self.device, dtype=self.dtype),
-                    actions=torch.tensor(episode_actions, device=self.device, dtype=self.dtype),
-                    rewards=torch.tensor(episode_rewards, device=self.device, dtype=self.dtype),
-                    dones=torch.tensor(episode_dones, device=self.device, dtype=torch.bool)
+                    observations=obs_tensor.to(device=self.device, dtype=self.dtype),
+                    actions=actions_tensor.to(device=self.device, dtype=self.dtype),
+                    rewards=rewards_tensor.to(device=self.device),
+                    dones=dones_tensor.to(device=self.device)
                 )
                 
                 episodes.append(episode)
@@ -155,9 +195,12 @@ class DeltaIrisTrainer:
                 
             # Forward pass
             obs = batch['observations'][:, :-1]  # All but last
-            actions = batch['actions'][:, :-1]   # All but last
+            actions_continuous = batch['actions'][:, :-1]   # All but last (continuous actions)
             
-            tokenizer_output = self.tokenizer(obs, actions)
+            # Discretize actions for tokenizer (tokenizer expects discrete actions)
+            actions_discrete = self.discretize_actions(actions_continuous)
+            
+            tokenizer_output = self.tokenizer(obs, actions_discrete)
             
             # Compute loss
             total_loss = tokenizer_output['losses']['total_tokenizer_loss']
@@ -206,15 +249,27 @@ class DeltaIrisTrainer:
                 actions = batch['actions'][:, :-1]
                 tokens = self.tokenizer.get_tokens(obs, actions)
                 
-            # Prepare targets
+            # Prepare targets (match sequence length)
+            target_seq_len = tokens.shape[1] - 1
             targets = {
-                'next_tokens': tokens[:, 1:],  # Shift tokens for next-token prediction
-                'rewards': batch['rewards'][:, 1:],
-                'dones': batch['dones'][:, 1:].float()
+                'next_tokens': tokens[:, 1:1+target_seq_len],
+                'rewards': batch['rewards'][:, 1:1+target_seq_len],
+                'dones': batch['dones'][:, 1:1+target_seq_len].float()
             }
             
+            # Discretize actions for world model
+            actions_for_wm = batch['actions'][:, :target_seq_len]
+            if self.action_discretizer:
+                # For continuous environments, discretize to bins
+                actions_discrete = self.action_discretizer.discretize(actions_for_wm)
+                # Take first action dimension if multi-dimensional 
+                actions_discrete = actions_discrete[:, :, 0] if actions_discrete.dim() > 2 else actions_discrete
+            else:
+                # For discrete environments, use raw actions
+                actions_discrete = actions_for_wm[:, :, 0].long() if actions_for_wm.dim() > 2 else actions_for_wm.long()
+            
             # Forward pass
-            predictions = self.world_model(tokens[:, :-1], batch['actions'][:, :-1, 0].long())
+            predictions = self.world_model(tokens[:, :-1], actions_discrete)
             
             # Compute loss
             loss_dict = self.world_model.compute_loss(predictions, targets)

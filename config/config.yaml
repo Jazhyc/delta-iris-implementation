@@ -1,7 +1,7 @@
 defaults:
   - _self_
-  - env: pendulum
-  - model: continuous
+  - env: cartpole
+  - model: discrete
 
 wandb:
   entity: personal_experiments

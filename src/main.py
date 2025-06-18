@@ -19,57 +19,80 @@ def create_config_from_hydra(cfg: DictConfig) -> TrainerConfig:
     
     # Set default values based on environment
     env, _ = make_env(cfg.env.name, num_envs=1)
-    obs_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.n if hasattr(env.action_space, 'n') else 1
     
-    print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, action_dim={action_dim}")
+    # Get observation dimension properly (handle vectorized environments)
+    if hasattr(env.observation_space, 'shape') and len(env.observation_space.shape) > 0:
+        obs_dim = env.observation_space.shape[-1]  # Get feature dimension
+    else:
+        obs_dim = env.observation_space.n
     
-    # Create component configs
+    # Determine if environment is continuous or discrete
+    print(f"DEBUG: env.action_space = {env.action_space}")
+    print(f"DEBUG: type(env.action_space) = {type(env.action_space)}")
+    print(f"DEBUG: hasattr(env.action_space, 'n') = {hasattr(env.action_space, 'n')}")
+    
+    is_continuous = not hasattr(env.action_space, 'n')
+    print(f"DEBUG: is_continuous = {is_continuous}")
+    
+    if is_continuous:
+        # For continuous environments, discretize actions
+        action_dim = cfg.model.environment.action_discretization_bins
+        print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, continuous actions discretized to {action_dim} bins")
+    else:
+        # For discrete environments, use the action space size
+        print(f"DEBUG: env.action_space.n = {env.action_space.n}")
+        action_dim = env.action_space.n
+        print(f"Environment {cfg.env.name}: obs_dim={obs_dim}, discrete action_dim={action_dim}")
+    
+    print(f"DEBUG: Final action_dim = {action_dim}")
+    
+    # Create component configs from Hydra config
+    print(f"DEBUG: Creating tokenizer config with obs_dim={obs_dim}, action_dim={action_dim}")
     tokenizer_config = TokenizerConfig(
         obs_dim=obs_dim,
         action_dim=action_dim,
-        hidden_dim=256,
-        latent_dim=64,
-        num_tokens=4,
-        codebook_size=1024,
-        learning_rate=1e-4
+        hidden_dim=cfg.model.tokenizer.hidden_dim,
+        latent_dim=cfg.model.tokenizer.latent_dim,
+        num_tokens=cfg.model.tokenizer.num_tokens,
+        codebook_size=cfg.model.tokenizer.codebook_size,
+        learning_rate=cfg.model.tokenizer.learning_rate
     )
     
     world_model_config = WorldModelConfig(
-        vocab_size=1024,
+        vocab_size=cfg.model.world_model.vocab_size,
         action_dim=action_dim,
-        latent_dim=64,
-        hidden_dim=512,
-        num_layers=4,
-        num_heads=8,
-        sequence_length=64,
-        learning_rate=1e-4
+        latent_dim=cfg.model.world_model.latent_dim,
+        hidden_dim=cfg.model.world_model.hidden_dim,
+        num_layers=cfg.model.world_model.num_layers,
+        num_heads=cfg.model.world_model.num_heads,
+        sequence_length=cfg.model.world_model.sequence_length,
+        learning_rate=cfg.model.world_model.learning_rate
     )
     
     actor_critic_config = ActorCriticConfig(
         obs_dim=obs_dim,
         action_dim=action_dim,
-        hidden_dim=256,
-        imagination_horizon=15,
-        gamma=0.99,
-        lambda_gae=0.95,
-        entropy_coef=0.01,
-        learning_rate=1e-4
+        hidden_dim=cfg.model.actor_critic.hidden_dim,
+        imagination_horizon=cfg.model.actor_critic.imagination_horizon,
+        gamma=cfg.model.actor_critic.gamma,
+        lambda_gae=cfg.model.actor_critic.lambda_gae,
+        entropy_coef=cfg.model.actor_critic.entropy_coef,
+        learning_rate=cfg.model.actor_critic.learning_rate
     )
     
     buffer_config = BufferConfig(
-        capacity=100000,
-        sequence_length=64,
-        batch_size=32
+        capacity=cfg.model.buffer.capacity,
+        sequence_length=cfg.model.buffer.sequence_length,
+        batch_size=cfg.model.buffer.batch_size
     )
     
     # Create main trainer config
     trainer_config = TrainerConfig(
-        epochs=1000,
-        steps_per_epoch=1000,
-        eval_frequency=10,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        dtype="bfloat16",
+        epochs=cfg.model.training.epochs,
+        steps_per_epoch=cfg.model.training.steps_per_epoch,
+        eval_frequency=cfg.model.training.eval_frequency,
+        device=cfg.model.training.device if torch.cuda.is_available() else "cpu",
+        dtype=cfg.model.training.dtype,
         tokenizer=tokenizer_config,
         world_model=world_model_config,
         actor_critic=actor_critic_config,
@@ -100,7 +123,7 @@ def main(cfg: DictConfig) -> None:
     )
     
     # Create and run trainer
-    trainer = DeltaIrisTrainer(config)
+    trainer = DeltaIrisTrainer(config, hydra_config=cfg)
     
     print("Starting Delta-IRIS training...")
     trainer.train()
