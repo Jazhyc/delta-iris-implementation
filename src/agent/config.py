@@ -15,6 +15,7 @@ class TokenizerConfig:
     num_tokens: int = 4
     codebook_size: int = 1024
     learning_rate: float = 1e-4
+    num_actions: Optional[int] = None  # For discrete actions, set to number of actions
 
 
 @dataclass 

@@ -1,15 +1,9 @@
 """
-Enhanced Tokenizer Module for Delta-IRIS
+Tokenizer module for Delta-IRIS vector environments
 """
 
-from .tokenizer import DeltaIrisTokenizer, DeltaTokenizerConfig, SpatialTokenizer, ContextAwareTokenizer
-from .utils import create_spatial_grid, extract_spatial_tokens
+from .quantizer import VectorQuantizer
+from .encoder_decoder import VectorEncoder, VectorDecoder
+from .vector_tokenizer import VectorTokenizer
 
-__all__ = [
-    'DeltaIrisTokenizer',
-    'DeltaTokenizerConfig',
-    'SpatialTokenizer', 
-    'ContextAwareTokenizer',
-    'create_spatial_grid',
-    'extract_spatial_tokens'
-]
+__all__ = ['VectorQuantizer', 'VectorEncoder', 'VectorDecoder', 'VectorTokenizer']

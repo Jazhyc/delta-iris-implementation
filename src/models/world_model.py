@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from .convnet import FrameCnnConfig, FrameEncoder
 from .slicer import Head
 from .transformer import TransformerEncoder, TransformerConfig
+from utils import LossWithIntermediateLosses
 
 
 @dataclass
@@ -73,13 +74,6 @@ def compute_softmax_over_buckets(logits: torch.FloatTensor, x_min: int = -20, x_
     buckets = torch.linspace(x_min, x_max, num_buckets).to(logits.device)
     probs = F.softmax(logits, dim=-1)
     return probs @ buckets
-
-
-class LossWithIntermediateLosses:
-    """Container for losses with intermediate components"""
-    def __init__(self, **kwargs) -> None:
-        self.loss_total = sum(kwargs.values())
-        self.intermediate_losses = {k: v.item() for k, v in kwargs.items()}
 
 
 class WorldModel(nn.Module):
